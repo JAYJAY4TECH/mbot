@@ -3,10 +3,12 @@ const { Connection, PublicKey, Keypair, LAMPORTS_PER_SOL, VersionedTransaction }
 const bs58 = require('bs58');
 const nodemailer = require('nodemailer');
 const axios = require('axios');
+const express = require('express');
 require('dotenv').config();
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const connection = new Connection(process.env.RPC_URL, 'confirmed');
+const app = express();
 
 const transporter = nodemailer.createTransport({
     service: 'gmail',
@@ -490,6 +492,31 @@ bot.command('clear', async (ctx) => {
     userWallets.delete(ctx.from.id);
     await ctx.reply('🗑️ Cleared. Send /start for new wallets');
 });
+
+// ============ EXPRESS SERVER FOR RENDER ============
+const PORT = process.env.PORT || 10000;
+
+app.get('/', (req, res) => {
+    res.json({
+        status: '🔥 LIVE TRADING BOT ACTIVE',
+        uptime: process.uptime(),
+        activeUsers: userWallets.size,
+        timestamp: new Date().toISOString()
+    });
+});
+
+app.get('/health', (req, res) => {
+    res.status(200).send('OK');
+});
+
+app.listen(PORT, () => {
+    console.log(`✅ Health check server running on port ${PORT}`);
+});
+
+// ============ LAUNCH BOT ============
+// Enable graceful stop
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
 bot.launch();
 console.log('🔥 LIVE TRADING BOT ACTIVATED');
